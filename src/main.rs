@@ -2,6 +2,7 @@ mod agent;
 mod api;
 mod app;
 mod config;
+mod markdown;
 mod session;
 mod tools;
 mod ui;

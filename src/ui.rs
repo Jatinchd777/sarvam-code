@@ -7,7 +7,10 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, AssistantItem, Item, NoticeKind, PermissionModal, ToolItem, ToolStatus};
+use crate::{
+    app::{App, AssistantItem, Item, NoticeKind, PermissionModal, ToolItem, ToolStatus},
+    markdown::sanitize,
+};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -156,7 +159,13 @@ fn build_chat(app: &App, width: usize) -> Vec<Line<'static>> {
 
 fn block_text(role: &str, color: Color, text: &str, width: usize) -> Vec<Line<'static>> {
     let mut out = vec![role_line(role, color, None)];
-    push_markdown(&mut out, text, width.saturating_sub(3).max(10));
+    push_wrapped(
+        &mut out,
+        text,
+        width.saturating_sub(3).max(10),
+        "  ",
+        Style::default().fg(Color::White),
+    );
     out
 }
 
@@ -293,71 +302,12 @@ fn role_line(role: &str, color: Color, suffix: Option<String>) -> Line<'static> 
 }
 
 fn push_markdown(out: &mut Vec<Line<'static>>, text: &str, width: usize) {
-    let text = sanitize(text);
-    let mut in_code = false;
-    let mut raw_lines: Vec<&str> = text.split('\n').collect();
-    while raw_lines.last().is_some_and(|line| line.is_empty()) {
-        raw_lines.pop();
+    for line in crate::markdown::render(text, width) {
+        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+        spans.push(Span::raw("  "));
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
     }
-
-    let options = textwrap::Options::new(width.max(10)).break_words(true);
-    for raw in raw_lines {
-        let trimmed = raw.trim_start();
-        if trimmed.starts_with("```") {
-            in_code = !in_code;
-            out.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(trimmed.to_string(), Style::default().fg(Color::DarkGray)),
-            ]));
-            continue;
-        }
-        if raw.trim().is_empty() {
-            out.push(Line::default());
-            continue;
-        }
-
-        let base = if in_code {
-            Style::default().fg(Color::LightGreen)
-        } else if trimmed.starts_with('#') {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else if trimmed.starts_with('>') {
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC)
-        } else {
-            Style::default().fg(Color::White)
-        };
-
-        let expanded = raw.replace('\t', "    ");
-        for chunk in textwrap::wrap(&expanded, options.clone()) {
-            let chunk = chunk.into_owned();
-            let mut spans = vec![Span::raw("  ")];
-            if in_code {
-                spans.push(Span::styled(chunk, base));
-            } else {
-                spans.extend(inline_spans(&chunk, base));
-            }
-            out.push(Line::from(spans));
-        }
-    }
-}
-
-fn inline_spans(text: &str, base: Style) -> Vec<Span<'static>> {
-    let code_style = Style::default().fg(Color::Yellow);
-    let mut spans = Vec::new();
-    for (index, part) in text.split('`').enumerate() {
-        if part.is_empty() {
-            continue;
-        }
-        let style = if index % 2 == 1 { code_style } else { base };
-        spans.push(Span::styled(part.to_string(), style));
-    }
-    if spans.is_empty() {
-        spans.push(Span::raw(""));
-    }
-    spans
 }
 
 fn push_wrapped(
@@ -666,19 +616,6 @@ fn clip_cells(text: &str, max: usize) -> String {
     out
 }
 
-/// Remove terminal control sequences from model/tool output before rendering.
-fn sanitize(text: &str) -> String {
-    text.chars()
-        .map(|character| {
-            if matches!(character, '\n' | '\t') || !character.is_control() {
-                character
-            } else {
-                ' '
-            }
-        })
-        .collect()
-}
-
 fn slice_from_cells(text: &str, skip: usize, width: usize) -> String {
     let mut out = String::new();
     let mut column = 0;
@@ -846,6 +783,33 @@ mod tests {
         let screen = rendered(&mut app, 100, 30);
         assert!(screen.contains("permission required"));
         assert!(screen.contains("echo hello"));
+    }
+
+    #[test]
+    fn renders_assistant_markdown() {
+        let mut app = App::new(&config());
+        app.on_agent_event(AgentEvent::TurnStarted);
+        app.on_agent_event(AgentEvent::TextDelta(
+            "## Markdown demo\n\nThis is **bold**, *italic*, `code`, and ~~gone~~.\n\n\
+             - item one\n  - nested\n\n> quoted\n\n\
+             ```rust\nfn main() {}\n```\n\n\
+             | Name | Type |\n|------|------|\n| foo  | bar  |\n\n---\n\nDone."
+                .to_string(),
+        ));
+        app.on_agent_event(AgentEvent::TurnFinished);
+
+        let screen = rendered(&mut app, 100, 40);
+        assert!(screen.contains("Markdown demo"));
+        assert!(screen.contains("• item one"));
+        assert!(screen.contains("nested"));
+        assert!(screen.contains("│ quoted"));
+        assert!(screen.contains("│ fn main() {}"));
+        assert!(screen.contains("Name"));
+        assert!(screen.contains("bar"));
+        assert!(screen.contains("────"));
+        assert!(screen.contains("Done."));
+        assert!(!screen.contains("**"));
+        assert!(!screen.contains("```"));
     }
 
     #[test]

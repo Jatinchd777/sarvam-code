@@ -33,6 +33,7 @@ The **Ratatui layer** only renders events and forwards keys — the same core ru
 | Feature | Details |
 |---------|---------|
 | **Streaming TUI** | Live chat transcript, token output, reasoning blocks, tool call cards, scrolling, permission modal |
+| **Markdown Rendering** | Headings, bold/italic/strikethrough, inline & fenced code with language labels, nested lists, task lists, quotes, rules, links, aligned tables |
 | **5 Tools** | `list_dir`, `read_file`, `edit_file`, `write_file`, `bash` — all workspace-sandboxed |
 | **Permission Modes** | `ask` (interactive approval), `read-only` (deny mutations), `yolo` (auto-approve) |
 | **Workspace Sandbox** | `realpath`-based, symlink-aware, prevents path traversal |
@@ -229,6 +230,7 @@ src/
 ├── tools.rs      Tool schemas, sandboxed execution, truncation, bash runner
 ├── session.rs    Atomic transcript persistence
 ├── app.rs        UI state machine, chat items, input editor, slash commands
+├── markdown.rs   CommonMark/GFM renderer: inline styles, lists, code, tables
 └── ui.rs         Ratatui rendering: header, transcript, tool cards, modal
 ```
 
@@ -292,6 +294,7 @@ src/
 | `clap` | `4.6.8` | CLI argument parsing |
 | `dirs` | `7.0.0` | Platform dirs for config/state |
 | `futures-util` | `0.3.34` | Async stream utilities |
+| `pulldown-cmark` | `0.13.6` | CommonMark/GFM parsing for TUI markdown |
 | `ratatui` | `0.29` | TUI rendering |
 | `reqwest` | `0.13.5` | HTTP client (json, stream, rustls) |
 | `serde` | `1.0.229` | Serialization |
@@ -361,6 +364,7 @@ sarvam-code/
 │   ├── tools.rs                # Tool schemas, sandboxed execution, truncation
 │   ├── session.rs              # Atomic transcript persistence
 │   ├── app.rs                  # UI state machine, chat items, input, slash cmds
+│   ├── markdown.rs             # CommonMark/GFM → styled terminal lines
 │   └── ui.rs                   # Ratatui rendering (header, transcript, cards, modal)
 └── target/                     # Build output (gitignored)
 ```
