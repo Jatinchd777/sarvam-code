@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "cipher": "AES-256-GCM",
+  "kdf": {
+    "algorithm": "Argon2id",
+    "salt": "uBeSfzpuIWCyfeq0nr6dZg==",
+    "memory_cost": 19456,
+    "time_cost": 2,
+    "parallelism": 1
+  }
+}
