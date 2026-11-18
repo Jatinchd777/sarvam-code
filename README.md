@@ -73,10 +73,16 @@ With **no prompt argument**, it opens the interactive TUI. Type a task and press
 The Ratatui interface gives you:
 
 - A **live chat transcript** with streaming tokens
+- A **minimal welcome screen** with a terminal rendering of the Sarvam rosette and live session specs
 - **Reasoning blocks** (when supported by the model)
 - **Tool call cards** with expandable output
 - A **permission modal** for mutating operations
-- **Slash commands** for quick control
+- **Slash commands** with a fuzzy-filtered palette above the input
+
+The landing screen draws the Sarvam rosette mark using the terminal palette, a short
+greeting, and the live session configuration (model, permission mode,
+workspace, and tools) as a quiet borderless list. It drops the mark and keeps
+a compact text layout on smaller terminals.
 
 ---
 
@@ -140,9 +146,22 @@ Every request body is logged to `/tmp/mock-sarvam-requests.jsonl` (override with
 | `Shift+Up` / `Shift+Down` | Scroll 3 lines |
 | `Ctrl+Home` / `Ctrl+End` | Jump to top / bottom |
 | `Ctrl+O` | Expand / collapse tool output |
-| `Up` / `Down` | Input history |
+| `Up` / `Down` | Select slash command suggestion, otherwise input history |
+| `Tab` | Complete the selected slash command |
 | `Ctrl+W` / `Ctrl+U` | Delete word / clear input |
 | `Ctrl+D` | Quit when input is empty |
+
+### Slash Command Palette
+
+Type `/` to list every command in a popup above the input. Continue typing to
+fuzzy-filter (`/tls` matches `/tools`). The highlighted row is always visible.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Move the selection |
+| `Tab` | Insert the selected command |
+| `Enter` | Complete a partial command, or run an exact one |
+| `Esc` | Clear the input and close the palette |
 
 ### Permission Modal
 
@@ -166,6 +185,8 @@ Every request body is logged to `/tmp/mock-sarvam-requests.jsonl` (override with
 | `/tools` | List available tools |
 | `/transcript` | Show transcript path |
 | `/exit`, `/quit` | Quit |
+
+Start typing `/` to browse these with fuzzy matching and arrow-key selection.
 
 ---
 

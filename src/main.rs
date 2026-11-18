@@ -216,6 +216,7 @@ async fn handle_input(
         Event::Mouse(mouse) => handle_mouse(mouse, app),
         Event::Paste(text) if !app.busy && app.permission.is_none() => {
             app.input.insert_str(&text);
+            app.reset_completion();
         }
         _ => {}
     }
@@ -292,7 +293,13 @@ async fn handle_key(
 
     match key.code {
         KeyCode::Enter => {
-            if let Some(command) = app.submit()
+            let selected = app.selected_completion();
+            let needs_args = selected.is_some_and(|command| !command.args.is_empty());
+            let exact = selected.is_some_and(|command| command.is_named(app.input.text.trim()));
+            if selected.is_some() && (!exact || needs_args) {
+                // Complete partial commands, and leave room for arguments.
+                app.complete_selected();
+            } else if let Some(command) = app.submit()
                 && commands.send(command).await.is_err()
             {
                 app.busy = false;
@@ -304,10 +311,17 @@ async fn handle_key(
                 app.scroll_to_bottom();
             } else {
                 app.input.clear();
+                app.reset_completion();
             }
         }
-        KeyCode::Backspace => app.input.backspace(),
-        KeyCode::Delete => app.input.delete(),
+        KeyCode::Backspace => {
+            app.input.backspace();
+            app.reset_completion();
+        }
+        KeyCode::Delete => {
+            app.input.delete();
+            app.reset_completion();
+        }
         KeyCode::Left => app.input.left(),
         KeyCode::Right => app.input.right(),
         KeyCode::Home if ctrl => app.scroll_to_top(),
@@ -316,20 +330,41 @@ async fn handle_key(
         KeyCode::End => app.input.end(),
         KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => app.scroll_up(3),
         KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => app.scroll_down(3),
-        KeyCode::Up => app.input.history_prev(),
-        KeyCode::Down => app.input.history_next(),
+        KeyCode::Up if app.completion_open() => app.completion_move(-1),
+        KeyCode::Down if app.completion_open() => app.completion_move(1),
+        KeyCode::Up => {
+            app.input.history_prev();
+            app.reset_completion();
+        }
+        KeyCode::Down => {
+            app.input.history_next();
+            app.reset_completion();
+        }
         KeyCode::PageUp => app.scroll_up(page),
         KeyCode::PageDown => app.scroll_down(page),
-        KeyCode::Tab => app.input.insert_str("  "),
+        KeyCode::Tab => {
+            if !app.complete_selected() {
+                app.input.insert_str("  ");
+            }
+        }
         KeyCode::Char('o') | KeyCode::Char('O') if ctrl => app.toggle_expand(),
-        KeyCode::Char('w') | KeyCode::Char('W') if ctrl => app.input.kill_word(),
-        KeyCode::Char('u') | KeyCode::Char('U') if ctrl => app.input.clear(),
+        KeyCode::Char('w') | KeyCode::Char('W') if ctrl => {
+            app.input.kill_word();
+            app.reset_completion();
+        }
+        KeyCode::Char('u') | KeyCode::Char('U') if ctrl => {
+            app.input.clear();
+            app.reset_completion();
+        }
         KeyCode::Char('d') | KeyCode::Char('D') if ctrl => {
             if app.input.text.is_empty() {
                 app.quit = true;
             }
         }
-        KeyCode::Char(character) if !ctrl && !alt => app.input.insert_char(character),
+        KeyCode::Char(character) if !ctrl && !alt => {
+            app.reset_completion();
+            app.input.insert_char(character);
+        }
         _ => {}
     }
 }

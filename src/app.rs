@@ -4,6 +4,167 @@ use crate::{
     tools,
 };
 
+/// A slash command as shown in the completions palette and `/help`.
+#[derive(Debug, Clone, Copy)]
+pub struct SlashCommand {
+    pub name: &'static str,
+    pub args: &'static str,
+    pub description: &'static str,
+    pub aliases: &'static [&'static str],
+}
+
+impl SlashCommand {
+    pub fn label(&self) -> String {
+        if self.args.is_empty() {
+            self.name.to_string()
+        } else {
+            format!("{} {}", self.name, self.args)
+        }
+    }
+
+    pub fn is_named(&self, text: &str) -> bool {
+        self.name == text || self.aliases.contains(&text)
+    }
+}
+
+pub const COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        name: "/help",
+        args: "",
+        description: "show commands and key bindings",
+        aliases: &[],
+    },
+    SlashCommand {
+        name: "/model",
+        args: "<name>",
+        description: "switch the model",
+        aliases: &[],
+    },
+    SlashCommand {
+        name: "/mode",
+        args: "<ask|read-only|yolo>",
+        description: "switch permission mode",
+        aliases: &[],
+    },
+    SlashCommand {
+        name: "/reset",
+        args: "",
+        description: "clear conversation and transcript",
+        aliases: &[],
+    },
+    SlashCommand {
+        name: "/clear",
+        args: "",
+        description: "clear the screen only",
+        aliases: &[],
+    },
+    SlashCommand {
+        name: "/tools",
+        args: "",
+        description: "list available tools",
+        aliases: &[],
+    },
+    SlashCommand {
+        name: "/transcript",
+        args: "",
+        description: "show the transcript path",
+        aliases: &[],
+    },
+    SlashCommand {
+        name: "/exit",
+        args: "",
+        description: "quit sarvam-code",
+        aliases: &["/quit", "/q"],
+    },
+];
+
+/// Commands that fuzzy-match the current input. Empty unless the input is a
+/// single slash token (no arguments yet).
+pub fn command_matches(input: &str) -> Vec<&'static SlashCommand> {
+    let Some(query) = input.strip_prefix('/') else {
+        return Vec::new();
+    };
+    if query.chars().any(char::is_whitespace) {
+        return Vec::new();
+    }
+
+    let mut scored: Vec<(i32, &'static SlashCommand)> = COMMANDS
+        .iter()
+        .filter_map(|command| score_command(query, command).map(|score| (score, command)))
+        .collect();
+    // Stable sort so an empty query keeps the registry order and equal scores
+    // stay in their declared order.
+    scored.sort_by_key(|left| std::cmp::Reverse(left.0));
+    scored.into_iter().map(|(_, command)| command).collect()
+}
+
+fn score_command(query: &str, command: &SlashCommand) -> Option<i32> {
+    let mut best = score_name(query, command.name.trim_start_matches('/'));
+    for alias in command.aliases {
+        if let Some(score) = score_name(query, alias.trim_start_matches('/')) {
+            let score = score - 20;
+            best = Some(best.map_or(score, |current| current.max(score)));
+        }
+    }
+    best
+}
+
+fn score_name(query: &str, candidate: &str) -> Option<i32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let query = query.to_ascii_lowercase();
+    let candidate = candidate.to_ascii_lowercase();
+
+    if candidate == query {
+        return Some(1000);
+    }
+    if candidate.starts_with(&query) {
+        return Some(600 - candidate.len() as i32);
+    }
+    if let Some(position) = candidate.find(&query) {
+        return Some(400 - position as i32 - candidate.len() as i32);
+    }
+
+    // Subsequence match: /tls -> tools
+    let mut remaining = candidate.chars();
+    let mut gaps = 0;
+    for wanted in query.chars() {
+        loop {
+            match remaining.next() {
+                Some(character) if character == wanted => break,
+                Some(_) => gaps += 1,
+                None => return None,
+            }
+        }
+    }
+    Some(200 - gaps)
+}
+
+pub fn help_text() -> String {
+    let mut text = String::from("Commands\n");
+    for command in COMMANDS {
+        text.push_str(&format!(
+            "  {:<24} {}\n",
+            command.label(),
+            command.description
+        ));
+    }
+    text.push_str("\nType / to browse commands with fuzzy matching.\n");
+    text.push_str("\nKeys\n");
+    text.push_str("  Enter              send\n");
+    text.push_str("  Mouse wheel        scroll the conversation\n");
+    text.push_str("  PgUp / PgDn        scroll the conversation a page\n");
+    text.push_str("  Shift+Up / Down    scroll the conversation three lines\n");
+    text.push_str("  Ctrl+Home / End    jump to the top / follow the bottom\n");
+    text.push_str("  Ctrl+O             expand or collapse tool output\n");
+    text.push_str("  Up / Down          select a slash command suggestion\n");
+    text.push_str("  Tab                complete the selected slash command\n");
+    text.push_str("  Esc                cancel the current turn, or clear the input\n");
+    text.push_str("  Ctrl+C             quit");
+    text
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     Running,
@@ -69,6 +230,8 @@ pub struct App {
     pub permission: Option<PermissionModal>,
     pub status: Option<String>,
     pub quit: bool,
+    /// Highlighted row in the slash-command palette.
+    pub completion_index: usize,
 }
 
 impl App {
@@ -89,6 +252,7 @@ impl App {
             permission: None,
             status: None,
             quit: false,
+            completion_index: 0,
         }
     }
 
@@ -201,6 +365,7 @@ impl App {
     /// Handles Enter. Returns a command for the agent, if any.
     pub fn submit(&mut self) -> Option<Command> {
         let raw = self.input.take();
+        self.completion_index = 0;
         let text = raw.trim().to_string();
         if text.is_empty() {
             return None;
@@ -222,7 +387,7 @@ impl App {
         let rest = parts.collect::<Vec<_>>().join(" ");
         match name {
             "/help" | "?" => {
-                self.notice(NoticeKind::Info, HELP.to_string());
+                self.notice(NoticeKind::Info, help_text());
                 None
             }
             "/quit" | "/exit" | "/q" => {
@@ -311,6 +476,48 @@ impl App {
 
     pub fn scroll_to_bottom(&mut self) {
         self.scroll = 0;
+    }
+
+    pub fn completion_matches(&self) -> Vec<&'static SlashCommand> {
+        command_matches(&self.input.text)
+    }
+
+    pub fn completion_open(&self) -> bool {
+        !self.completion_matches().is_empty()
+    }
+
+    pub fn selected_completion(&self) -> Option<&'static SlashCommand> {
+        let matches = self.completion_matches();
+        if matches.is_empty() {
+            return None;
+        }
+        matches
+            .get(self.completion_index.min(matches.len() - 1))
+            .copied()
+    }
+
+    /// Replace the input with the highlighted command plus a trailing space.
+    pub fn complete_selected(&mut self) -> bool {
+        let Some(command) = self.selected_completion() else {
+            return false;
+        };
+        self.input.set(format!("{} ", command.name));
+        self.completion_index = 0;
+        true
+    }
+
+    pub fn completion_move(&mut self, delta: isize) {
+        let count = self.completion_matches().len();
+        if count == 0 {
+            return;
+        }
+        let index =
+            (self.completion_index.min(count - 1) as isize + delta).rem_euclid(count as isize);
+        self.completion_index = index as usize;
+    }
+
+    pub fn reset_completion(&mut self) {
+        self.completion_index = 0;
     }
 
     fn push_text(&mut self, text: String) {
@@ -498,25 +705,100 @@ impl Input {
             self.cursor = self.text.len();
         }
     }
+
+    /// Replace the input text and put the cursor at the end.
+    pub fn set(&mut self, text: String) {
+        self.cursor = text.len();
+        self.text = text;
+        self.history_pos = self.history.len();
+        self.draft.clear();
+    }
 }
 
-const HELP: &str = "\
-Commands
-  /help              show this help
-  /model <name>      switch model
-  /mode <mode>       ask | read-only | yolo
-  /reset             clear the conversation and transcript
-  /clear             clear the screen only
-  /tools             list available tools
-  /transcript        show the transcript path
-  /exit, /quit       quit
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
 
-Keys
-  Enter              send
-  Mouse wheel        scroll the conversation
-  PgUp / PgDn        scroll the conversation a page
-  Shift+Up / Down    scroll the conversation three lines
-  Ctrl+Home / End    jump to the top / follow the bottom
-  Ctrl+O             expand or collapse tool output
-  Esc                cancel the current turn, or clear the input
-  Ctrl+C             quit";
+    fn config() -> Config {
+        Config {
+            api_key: "test".to_string(),
+            api_url: "http://localhost".to_string(),
+            model: "test-model".to_string(),
+            effort: None,
+            permission_mode: PermissionMode::Ask,
+            max_steps: 100,
+            max_tokens: 1000,
+            bash_timeout_secs: 5,
+            max_output: 8000,
+            http_timeout_secs: 30,
+            temperature: 0.2,
+            workspace: PathBuf::from("/tmp/workspace"),
+            state_dir: PathBuf::from("/tmp/state"),
+            transcript_path: PathBuf::from("/tmp/state/history.json"),
+        }
+    }
+
+    fn names(query: &str) -> Vec<&'static str> {
+        command_matches(query)
+            .into_iter()
+            .map(|command| command.name)
+            .collect()
+    }
+
+    #[test]
+    fn bare_slash_lists_every_command() {
+        assert_eq!(
+            names("/"),
+            COMMANDS.iter().map(|c| c.name).collect::<Vec<_>>()
+        );
+        assert!(command_matches("").is_empty());
+    }
+
+    #[test]
+    fn filters_by_prefix() {
+        let matches = names("/mo");
+        assert_eq!(matches, vec!["/mode", "/model"]);
+        assert_eq!(names("/res"), vec!["/reset"]);
+        assert!(names("/zzz").is_empty());
+    }
+
+    #[test]
+    fn fuzzy_matches_subsequences() {
+        assert_eq!(names("/tls").first(), Some(&"/tools"));
+        assert_eq!(names("/trs").first(), Some(&"/transcript"));
+    }
+
+    #[test]
+    fn aliases_match_but_display_primary_name() {
+        assert_eq!(names("/q"), vec!["/exit"]);
+        assert_eq!(names("/quit"), vec!["/exit"]);
+    }
+
+    #[test]
+    fn arguments_and_plain_text_do_not_open_the_palette() {
+        assert!(command_matches("/model some-model").is_empty());
+        assert!(command_matches("/mode yolo").is_empty());
+        assert!(command_matches("/ ").is_empty());
+        assert!(command_matches("hello").is_empty());
+        assert!(command_matches(" /help").is_empty());
+    }
+
+    #[test]
+    fn completion_navigation_cycles_and_completes() {
+        let mut app = App::new(&config());
+        app.input.set("/mo".to_string());
+        assert!(app.completion_open());
+        assert_eq!(app.selected_completion().map(|c| c.name), Some("/mode"));
+
+        app.completion_move(1);
+        assert_eq!(app.selected_completion().map(|c| c.name), Some("/model"));
+        app.completion_move(1);
+        assert_eq!(app.selected_completion().map(|c| c.name), Some("/mode"));
+
+        assert!(app.complete_selected());
+        assert_eq!(app.input.text, "/mode ");
+        app.reset_completion();
+        assert_eq!(app.completion_index, 0);
+    }
+}

@@ -8,7 +8,9 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, AssistantItem, Item, NoticeKind, PermissionModal, ToolItem, ToolStatus},
+    app::{
+        App, AssistantItem, Item, NoticeKind, PermissionModal, SlashCommand, ToolItem, ToolStatus,
+    },
     markdown::sanitize,
 };
 
@@ -24,9 +26,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
+    let matches = app.completion_matches();
+    let palette_height = if matches.is_empty() {
+        0
+    } else {
+        matches.len().min(8) as u16 + 2
+    };
+
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
+        Constraint::Length(palette_height),
         Constraint::Length(3),
         Constraint::Length(1),
     ])
@@ -34,12 +44,96 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     draw_header(frame, app, chunks[0]);
     draw_chat(frame, app, chunks[1]);
-    draw_input(frame, app, chunks[2]);
-    draw_footer(frame, app, chunks[3]);
+    if palette_height > 0 {
+        draw_command_palette(frame, app, &matches, chunks[2]);
+    }
+    draw_input(frame, app, chunks[3]);
+    draw_footer(frame, app, chunks[4]);
 
     if let Some(modal) = app.permission.clone() {
         draw_permission(frame, &modal);
     }
+}
+
+/// Suggestions for the slash command currently being typed, shown directly
+/// above the input.
+fn draw_command_palette(
+    frame: &mut Frame,
+    app: &App,
+    matches: &[&'static SlashCommand],
+    area: Rect,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Line::from(vec![
+            Span::styled(
+                " commands ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "{} match{} ",
+                    matches.len(),
+                    if matches.len() == 1 { "" } else { "es" }
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let rows = inner.height as usize;
+    let selected = app.completion_index.min(matches.len().saturating_sub(1));
+    // Keep the highlighted row visible when the list is taller than the box.
+    let offset = selected.saturating_sub(rows.saturating_sub(1));
+
+    let label_width = matches
+        .iter()
+        .map(|command| UnicodeWidthStr::width(command.label().as_str()))
+        .max()
+        .unwrap_or(0)
+        .min(inner.width as usize / 2);
+
+    let lines: Vec<Line<'static>> = matches
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(rows)
+        .map(|(index, command)| {
+            let active = index == selected;
+            let marker = if active { "› " } else { "  " };
+            let label = command.label();
+            let padding = label_width.saturating_sub(UnicodeWidthStr::width(label.as_str()));
+            let row = format!(
+                "{marker}{label}{}{}",
+                " ".repeat(padding),
+                if inner.width as usize > label_width + marker.len() + 4 {
+                    format!("  {}", command.description)
+                } else {
+                    String::new()
+                }
+            );
+            let row = slice_from_cells(&row, 0, inner.width as usize);
+            let style = if active {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Line::from(Span::styled(row, style))
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -88,7 +182,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut lines = if app.items.is_empty() {
-        welcome()
+        welcome(app, area.width as usize, area.height as usize)
     } else {
         build_chat(app, area.width as usize)
     };
@@ -112,25 +206,192 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(window), area);
 }
 
-fn welcome() -> Vec<Line<'static>> {
-    vec![
-        Line::default(),
-        Line::from(Span::styled(
-            "  sarvam-code",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "  a minimal Sarvam AI coding agent",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::default(),
-        Line::from(Span::styled(
-            "  describe a task, or type /help",
+/// Terminal blue, used for the mark and the brand line.
+const ACCENT: Color = Color::LightBlue;
+
+/// The Sarvam rosette: eight interlocking loops around a central diamond.
+const LOGO_LARGE: [&str; 12] = [
+    "         ▗▄▛▀▙▖         ",
+    "    ▄▛▀▜█▜▙▄ ▄██▟█▄▄    ",
+    "   ▐▘ ▗▟  ▄▛▜▙  ▜▖ ▝▙   ",
+    "  ▄█▀▀▜▀▀▀▘  ▝▀▀▀█▀▜█▖  ",
+    "▄▛▘▜▖▄█          █▖ ▟▀▙▖",
+    "▜▖ ▟█      ▄▄     ▀█▙  █",
+    " ▜▟▘▝█     ▀▀    ▗▞▘▝▙▟▘",
+    " ▟▀▙▄▛            ▙▗▄█▌ ",
+    " █  ▐▛▀▜▖      ▄█▛▜▛ ▐▌ ",
+    " ▝▀▙▟▙▄▄█▄▟▀▜▄▟▌  █▄▄▛▘ ",
+    "     ▜▌▀ ▀▙▖▄▞▀▀▀█▘     ",
+    "      ▝▙▄█▀▀▀▙▄▄▛       ",
+];
+
+const LOGO_SMALL: [&str; 10] = [
+    "       ▗▄▀▀▚▖       ",
+    "   ▟▀▀█▀▀▄▄▞▀█▀▀▙   ",
+    "  ▐▙▄▟█▄▟▘▝▚▄▟▙▄▟▌  ",
+    "▗▞▜▌▗▟        █ ▝▛▄ ",
+    "▜ ▗█▛    ▄▄    ▀▟▌ █",
+    "▝▙▛ ▜    ▀▀   ▗▛ ▜▟▘",
+    " ▛▝▚▙▄         █▄▀▙ ",
+    " ▜▄ ▌ ▜▖▗▄▄ ▟▀▀█ ▄▛ ",
+    "   ▀▜▛▀▀▙  █▀▀█▀▀▘  ",
+    "     ▀▄▄▞▀▜▄▄▟▘     ",
+];
+
+const TOOL_NAMES: [&str; 5] = ["list_dir", "read_file", "edit_file", "write_file", "bash"];
+
+/// Landing screen shown before the first message: the Sarvam mark, a short
+/// greeting and the live session configuration. The mark is dropped when the
+/// viewport is too small for it to breathe.
+fn welcome(app: &App, width: usize, height: usize) -> Vec<Line<'static>> {
+    let large = width >= 40 && height >= 22;
+    let small = !large && width >= 28 && height >= 19;
+
+    let mut lines = Vec::new();
+    if large {
+        lines.extend(logo_lines(&LOGO_LARGE, width));
+        lines.push(Line::default());
+    } else if small {
+        lines.extend(logo_lines(&LOGO_SMALL, width));
+        lines.push(Line::default());
+    }
+
+    if height >= 5 {
+        if width >= 26 {
+            lines.push(centered(
+                vec![
+                    Span::styled("Welcome to ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        "sarvam-code",
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    ),
+                ],
+                width,
+            ));
+        } else {
+            lines.push(centered_text("sarvam-code", ACCENT, width));
+        }
+        if height >= 12 && width >= 36 {
+            lines.push(centered_text(
+                "a minimal Sarvam AI coding agent",
+                Color::DarkGray,
+                width,
+            ));
+        }
+        lines.push(Line::default());
+    }
+
+    if height >= 9 {
+        lines.extend(session_specs(app, width, height >= 20));
+        lines.push(Line::default());
+    }
+
+    let tip = if width >= 52 {
+        "ask a question, or type / for commands"
+    } else if width >= 32 {
+        "ask a question, or / for commands"
+    } else {
+        "/ for commands"
+    };
+    lines.push(centered_text(tip, Color::DarkGray, width));
+
+    if lines.len() < height {
+        let top = ((height - lines.len()) / 2).min(6);
+        if top > 0 {
+            lines.splice(0..0, std::iter::repeat_n(Line::default(), top));
+        }
+    }
+    lines.truncate(height);
+    lines
+}
+
+fn logo_lines(art: &'static [&'static str], width: usize) -> Vec<Line<'static>> {
+    art.iter()
+        .map(|row| centered(vec![Span::styled(*row, Style::default().fg(ACCENT))], width))
+        .collect()
+}
+
+/// A quiet, borderless list of the live session configuration. The block is
+/// centered as a whole so labels and values stay aligned.
+fn session_specs(app: &App, width: usize, include_tools: bool) -> Vec<Line<'static>> {
+    let value_width = width
+        .saturating_sub(13)
+        .clamp(11, 56)
+        .min((width * 3 / 5).max(18));
+    let mode_style = match app.mode {
+        crate::config::PermissionMode::Ask => Style::default().fg(ACCENT),
+        crate::config::PermissionMode::ReadOnly => Style::default().fg(Color::LightBlue),
+        crate::config::PermissionMode::Yolo => Style::default().fg(Color::LightRed),
+    };
+
+    let mut rows: Vec<(&str, String, Style)> = vec![
+        (
+            "model",
+            app.model.clone(),
+            Style::default().fg(Color::White),
+        ),
+        ("mode", app.mode.to_string(), mode_style),
+        (
+            "workspace",
+            shorten_path(&app.workspace, value_width),
             Style::default().fg(Color::Gray),
-        )),
-    ]
+        ),
+    ];
+
+    if include_tools {
+        let tools = TOOL_NAMES.join(" · ");
+        if UnicodeWidthStr::width(tools.as_str()) <= value_width {
+            rows.push(("tools", tools, Style::default().fg(Color::DarkGray)));
+        }
+    }
+
+    for (_, value, _) in &mut rows {
+        let clipped = clip_cells(value.as_str(), value_width);
+        *value = clipped;
+    }
+
+    let block_width = 9
+        + 2
+        + rows
+            .iter()
+            .map(|(_, value, _)| UnicodeWidthStr::width(value.as_str()))
+            .max()
+            .unwrap_or(0);
+    let left = width.saturating_sub(block_width) / 2;
+    let label_style = Style::default().fg(Color::DarkGray);
+
+    rows.into_iter()
+        .map(|(name, value, style)| {
+            let mut spans = Vec::new();
+            if left > 0 {
+                spans.push(Span::raw(" ".repeat(left)));
+            }
+            spans.push(Span::styled(format!("{name:<9}  "), label_style));
+            spans.push(Span::styled(value, style));
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn centered(spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
+    let used: usize = spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum();
+    let left = width.saturating_sub(used) / 2;
+    let mut line = Vec::with_capacity(spans.len() + 1);
+    if left > 0 {
+        line.push(Span::raw(" ".repeat(left)));
+    }
+    line.extend(spans);
+    Line::from(line)
+}
+
+fn centered_text(text: &str, color: Color, width: usize) -> Line<'static> {
+    centered(
+        vec![Span::styled(text.to_string(), Style::default().fg(color))],
+        width,
+    )
 }
 
 fn build_chat(app: &App, width: usize) -> Vec<Line<'static>> {
@@ -392,10 +653,12 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let hint = if app.busy {
+    let hint = if app.completion_open() {
+        "↑↓ select · tab complete · enter run · esc clear"
+    } else if app.busy {
         "esc cancel · wheel/pgup scroll · ctrl+o tools · ctrl+c quit"
     } else {
-        "enter send · wheel/pgup scroll · ctrl+o tools · esc clear · ctrl+c quit"
+        "enter send · / commands · wheel/pgup scroll · ctrl+o tools · esc clear · ctrl+c quit"
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -597,17 +860,22 @@ fn shorten_path(path: &str, max: usize) -> String {
 fn clip_cells(text: &str, max: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
-    for character in text.chars() {
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
         let character = if character.is_control() {
             ' '
         } else {
             character
         };
         let width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if used + width > max {
+        // Reserve a cell for the ellipsis when there is more text to come.
+        if characters.peek().is_some() && used + width >= max {
             if !out.is_empty() {
                 out.push('…');
             }
+            return out;
+        }
+        if used + width > max {
             break;
         }
         out.push(character);
@@ -813,9 +1081,116 @@ mod tests {
     }
 
     #[test]
+    fn shows_slash_command_palette_above_the_input() {
+        let mut app = App::new(&config());
+        app.input.set("/".to_string());
+
+        let rows = screen_rows(&mut app, 70, 24);
+        let palette = rows
+            .iter()
+            .position(|row| row.contains("commands 8 matches"))
+            .expect("palette title is visible");
+        let input = rows
+            .iter()
+            .position(|row| row.contains("message"))
+            .expect("input box is visible");
+        assert!(palette < input, "palette should sit above the input");
+        assert!(
+            rows[palette + 1..input]
+                .iter()
+                .any(|row| row.contains("/help"))
+        );
+        assert!(
+            rows[palette + 1..input]
+                .iter()
+                .any(|row| row.contains("/tools"))
+        );
+        assert!(rows[palette + 1..input].iter().any(|row| row.contains('›')));
+    }
+
+    #[test]
+    fn filters_the_slash_command_palette() {
+        let mut app = App::new(&config());
+        app.input.set("/mo".to_string());
+
+        let rows = screen_rows(&mut app, 70, 24);
+        let start = rows
+            .iter()
+            .position(|row| row.contains("commands 2 matches"))
+            .expect("palette title");
+        let end = rows
+            .iter()
+            .position(|row| row.contains("message"))
+            .expect("input box");
+        let palette = &rows[start..end];
+        assert!(palette[0].contains("2 matches"));
+        assert!(palette.iter().any(|row| row.contains("/mode")));
+        assert!(palette.iter().any(|row| row.contains("/model")));
+        assert!(!palette.iter().any(|row| row.contains("/help")));
+
+        app.completion_move(1);
+        let rows = screen_rows(&mut app, 70, 24);
+        let model_row = rows
+            .iter()
+            .find(|row| row.contains("/model"))
+            .expect("/model row");
+        assert!(model_row.contains('›'));
+    }
+
+    #[test]
+    fn welcome_screen_shows_mark_and_session_specs() {
+        let mut app = App::new(&config());
+        let screen = rendered(&mut app, 100, 32);
+        assert!(screen.contains("▗▄▛▀▙▖"), "the Sarvam rosette is rendered");
+        assert!(screen.contains("Welcome to sarvam-code"));
+        assert!(screen.contains("a minimal Sarvam AI coding agent"));
+        assert!(screen.contains("test-model"));
+        assert!(screen.contains("workspace"));
+        assert!(screen.contains("list_dir"));
+        assert!(screen.contains("ask"));
+        assert!(screen.contains("/ for commands"));
+        assert!(!screen.contains("sarvam-code v"), "no version panel");
+        assert!(!screen.contains("███████╗"), "no block-letter wordmark");
+    }
+
+    #[test]
+    fn welcome_screen_adapts_to_small_terminals() {
+        let mut app = App::new(&config());
+        let compact = rendered(&mut app, 44, 24);
+        assert!(compact.contains("▗▄▀▀▚▖"), "compact rosette is rendered");
+        assert!(!compact.contains("▗▄▛▀▙▖"), "large rosette is not rendered");
+        assert!(compact.contains("test-model"));
+        assert!(compact.contains("Welcome to sarvam-code"));
+
+        let mut app = App::new(&config());
+        let medium = rendered(&mut app, 44, 20);
+        assert!(medium.contains("Welcome to sarvam-code"));
+        assert!(medium.contains("test-model"));
+        assert!(!medium.contains("▗"), "mark is dropped when it cannot fit");
+
+        let mut app = App::new(&config());
+        let text_only = rendered(&mut app, 28, 12);
+        assert!(text_only.contains("Welcome to sarvam-code"));
+        assert!(
+            !text_only.contains("▗"),
+            "mark is dropped when it cannot fit"
+        );
+        assert!(text_only.contains("/ for commands"));
+
+        let mut app = App::new(&config());
+        let narrow = rendered(&mut app, 24, 16);
+        assert!(narrow.contains("sarvam-code"));
+        assert!(narrow.contains("test-model"));
+    }
+
+    #[test]
     fn tiny_terminal_does_not_panic() {
         let mut app = App::new(&config());
         let screen = rendered(&mut app, 16, 6);
         assert!(screen.contains("terminal"));
+
+        let mut app = App::new(&config());
+        app.input.set("/".to_string());
+        let _ = rendered(&mut app, 30, 9);
     }
 }
