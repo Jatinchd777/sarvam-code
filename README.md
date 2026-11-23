@@ -57,8 +57,9 @@ git clone https://github.com/yourorg/sarvam-code.git
 cd sarvam-code
 cargo build --release
 
-# 2. Export your API key
-export SARVAM_API_KEY="your-key"
+# 2. Configure your API key
+mkdir -p ~/.config/sarvam-code
+printf 'api-key = "your-key"\n' > ~/.config/sarvam-code/config.toml
 
 # 3. Run
 ./target/release/sarvam-code
@@ -115,7 +116,8 @@ python3 scripts/mock-sarvam.py &
 Then run the harness against it:
 
 ```bash
-SARVAM_API_KEY=dummy \
+printf 'api-key = "dummy"\n' > /tmp/sarvam-code-mock.toml
+SARVAM_CONFIG=/tmp/sarvam-code-mock.toml \
 SARVAM_API_URL=http://127.0.0.1:8877/v2/chat/completions \
 PERMISSION_MODE=read-only \
 cargo run -- --print "test the loop"
@@ -156,6 +158,9 @@ Every request body is logged to `/tmp/mock-sarvam-requests.jsonl` (override with
 Type `/` to list every command in a popup above the input. Continue typing to
 fuzzy-filter (`/tls` matches `/tools`). The highlighted row is always visible.
 
+Type `/model ` to open the fuzzy-filtered model list. Use the arrow keys to
+choose a model and press `Enter` to switch, or `Tab` to complete it.
+
 | Key | Action |
 |-----|--------|
 | `Up` / `Down` | Move the selection |
@@ -192,13 +197,13 @@ Start typing `/` to browse these with fuzzy matching and arrow-key selection.
 
 ## ⚙️ Configuration
 
-Precedence: **CLI flags > environment > config file > defaults**
+Precedence for configurable options: **CLI flags > environment > config file > defaults**.
+The API key is read only from the config file and is never read from an environment variable.
 
 ### Environment Variables
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `SARVAM_API_KEY` | — (required) | Sent as `api-subscription-key` header |
 | `SARVAM_API_URL` | `https://api.sarvam.ai/v2/chat/completions` | Endpoint |
 | `SARVAM_MODEL` | `sarvam-105b-conversations` | Model name |
 | `SARVAM_EFFORT` | *(omitted)* | `low`, `high`, `max` |
@@ -215,6 +220,7 @@ Precedence: **CLI flags > environment > config file > defaults**
 ### Config File (`~/.config/sarvam-code/config.toml`)
 
 ```toml
+api-key = "your-key"
 model = "sarvam-105b-conversations"
 permission_mode = "ask"
 max_steps = 20
@@ -341,8 +347,9 @@ cargo test
 # 1. Start mock
 python3 scripts/mock-sarvam.py &
 
-# 2. Run harness against it
-SARVAM_API_KEY=dummy \
+# 2. Configure a dummy API key and run against it
+printf 'api-key = "dummy"\n' > /tmp/sarvam-code-mock.toml
+SARVAM_CONFIG=/tmp/sarvam-code-mock.toml \
 SARVAM_API_URL=http://127.0.0.1:8877/v2/chat/completions \
 PERMISSION_MODE=read-only \
 cargo run -- --print "test the loop"
@@ -438,7 +445,7 @@ MIT — see [LICENSE](LICENSE) for details.
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| `SARVAM_API_KEY is not set` | Missing env var | `export SARVAM_API_KEY="your-key"` |
+| API key configuration error | Missing `api-key` in config | Add `api-key = "your-key"` to `~/.config/sarvam-code/config.toml` |
 | `cannot reach the Sarvam API` | Network / firewall | Check `SARVAM_API_URL` and connectivity |
 | Permission modal never appears | Headless mode | Use `PERMISSION_MODE=yolo` or run without `--print` |
 | Mock server returns wrong step | Mock not restarted | Kill and restart `scripts/mock-sarvam.py` |

@@ -294,9 +294,18 @@ async fn handle_key(
     match key.code {
         KeyCode::Enter => {
             let selected = app.selected_completion();
-            let needs_args = selected.is_some_and(|command| !command.args.is_empty());
-            let exact = selected.is_some_and(|command| command.is_named(app.input.text.trim()));
-            if selected.is_some() && (!exact || needs_args) {
+            if selected.is_some_and(|completion| completion.is_model()) {
+                app.complete_selected();
+                if let Some(command) = app.submit()
+                    && commands.send(command).await.is_err()
+                {
+                    app.busy = false;
+                    app.error("the agent task has stopped");
+                }
+            } else if selected.is_some_and(|completion| {
+                matches!(completion, app::Completion::Command(command) if !command.args.is_empty())
+                    || !completion.is_named(app.input.text.trim())
+            }) {
                 // Complete partial commands, and leave room for arguments.
                 app.complete_selected();
             } else if let Some(command) = app.submit()

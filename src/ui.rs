@@ -3,13 +3,16 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
+    },
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{
-        App, AssistantItem, Item, NoticeKind, PermissionModal, SlashCommand, ToolItem, ToolStatus,
+        App, AssistantItem, Completion, Item, NoticeKind, PermissionModal, ToolItem, ToolStatus,
     },
     markdown::sanitize,
 };
@@ -55,21 +58,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-/// Suggestions for the slash command currently being typed, shown directly
-/// above the input.
-fn draw_command_palette(
-    frame: &mut Frame,
-    app: &App,
-    matches: &[&'static SlashCommand],
-    area: Rect,
-) {
+/// Slash-command and model suggestions shown directly above the input.
+fn draw_command_palette(frame: &mut Frame, app: &App, matches: &[Completion], area: Rect) {
+    let title = if matches
+        .first()
+        .is_some_and(|completion| completion.is_model())
+    {
+        " models "
+    } else {
+        " commands "
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .title(Line::from(vec![
             Span::styled(
-                " commands ",
+                title,
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -96,7 +101,7 @@ fn draw_command_palette(
 
     let label_width = matches
         .iter()
-        .map(|command| UnicodeWidthStr::width(command.label().as_str()))
+        .map(|completion| UnicodeWidthStr::width(completion.label().as_str()))
         .max()
         .unwrap_or(0)
         .min(inner.width as usize / 2);
@@ -106,16 +111,16 @@ fn draw_command_palette(
         .enumerate()
         .skip(offset)
         .take(rows)
-        .map(|(index, command)| {
+        .map(|(index, completion)| {
             let active = index == selected;
             let marker = if active { "› " } else { "  " };
-            let label = command.label();
+            let label = completion.label();
             let padding = label_width.saturating_sub(UnicodeWidthStr::width(label.as_str()));
             let row = format!(
                 "{marker}{label}{}{}",
                 " ".repeat(padding),
                 if inner.width as usize > label_width + marker.len() + 4 {
-                    format!("  {}", command.description)
+                    format!("  {}", completion.description())
                 } else {
                     String::new()
                 }
@@ -165,10 +170,10 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::DarkGray),
         ),
     ]);
-    frame.render_widget(Paragraph::new(line), area);
-
     if app.busy {
-        let line = Line::from(vec![
+        let chunks = Layout::horizontal([Constraint::Min(0), Constraint::Length(10)]).split(area);
+        frame.render_widget(Paragraph::new(line), chunks[0]);
+        let status = Line::from(vec![
             Span::styled(
                 format!("{} ", spinner_glyph(app.spinner)),
                 Style::default().fg(Color::Yellow),
@@ -176,18 +181,31 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("working", Style::default().fg(Color::Yellow)),
             Span::raw(" "),
         ]);
-        frame.render_widget(Paragraph::new(line).alignment(Alignment::Right), area);
+        frame.render_widget(
+            Paragraph::new(status).alignment(Alignment::Right),
+            chunks[1],
+        );
+    } else {
+        frame.render_widget(Paragraph::new(line), area);
     }
 }
 
 fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
+    let content_area = Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    };
     let mut lines = if app.items.is_empty() {
-        welcome(app, area.width as usize, area.height as usize)
+        welcome(
+            app,
+            content_area.width as usize,
+            content_area.height as usize,
+        )
     } else {
-        build_chat(app, area.width as usize)
+        build_chat(app, content_area.width as usize)
     };
 
-    let height = area.height as usize;
+    let height = content_area.height as usize;
     app.viewport_height = height;
     let total = lines.len();
     // While the reader is scrolled up, keep the same content in view as new
@@ -203,7 +221,24 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     let start = end.saturating_sub(height);
     let window: Vec<Line<'static>> = lines.drain(start..end).collect();
 
-    frame.render_widget(Paragraph::new(window), area);
+    frame.render_widget(Paragraph::new(window), content_area);
+    if max_scroll > 0 && area.width > content_area.width {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_symbol("█")
+            .track_symbol(Some("│"));
+        let mut state = ScrollbarState::new(total)
+            .viewport_content_length(height)
+            .position(start);
+        frame.render_stateful_widget(
+            scrollbar,
+            Rect {
+                x: content_area.right(),
+                width: 1,
+                ..area
+            },
+            &mut state,
+        );
+    }
 }
 
 /// Terminal blue, used for the mark and the brand line.
@@ -485,22 +520,25 @@ fn block_tool(tool: &ToolItem, width: usize, spinner: usize, expanded: bool) -> 
         return out;
     }
 
-    let lines: Vec<&str> = tool.output.trim_end_matches('\n').split('\n').collect();
-    let limit = if expanded { 80 } else { 4 };
+    let output = sanitize(&tool.output);
+    let lines: Vec<&str> = output.trim_end_matches('\n').split('\n').collect();
+    let limit = if expanded { lines.len() } else { 4 };
     let style = if tool.status == ToolStatus::Error {
         Style::default().fg(Color::Red)
     } else {
         Style::default().fg(Color::Gray)
     };
+    let output_width = width.saturating_sub(6).max(1);
+    let options = textwrap::Options::new(output_width).break_words(true);
 
     for line in lines.iter().take(limit) {
-        out.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                clip_cells(&line.replace('\t', "    "), width.saturating_sub(6).max(10)),
-                style,
-            ),
-        ]));
+        let line = line.replace('\t', "    ");
+        for chunk in textwrap::wrap(&line, options.clone()) {
+            out.push(Line::from(vec![
+                Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(chunk.into_owned(), style),
+            ]));
+        }
     }
     if lines.len() > limit {
         out.push(Line::from(vec![Span::styled(
@@ -660,14 +698,6 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "enter send · / commands · wheel/pgup scroll · ctrl+o tools · esc clear · ctrl+c quit"
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!(" {hint}"),
-            Style::default().fg(Color::DarkGray),
-        ))),
-        area,
-    );
-
     let status = if let Some(status) = &app.status {
         Some((status.clone(), Color::Yellow))
     } else if app.scroll > 0 {
@@ -680,12 +710,31 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     if let Some((text, color)) = status {
+        let status_width = (UnicodeWidthStr::width(text.as_str()) + 1).min(area.width as usize);
+        let chunks =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(status_width as u16)])
+                .split(area);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {hint}"),
+                Style::default().fg(Color::DarkGray),
+            ))),
+            chunks[0],
+        );
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!("{text} "),
                 Style::default().fg(color),
             )))
             .alignment(Alignment::Right),
+            chunks[1],
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {hint}"),
+                Style::default().fg(Color::DarkGray),
+            ))),
             area,
         );
     }
@@ -1001,6 +1050,13 @@ mod tests {
     }
 
     #[test]
+    fn shows_a_scrollbar_for_long_conversations() {
+        let mut app = long_conversation();
+        let rows = screen_rows(&mut app, 60, 20);
+        assert!(rows.iter().any(|row| row.contains('█')));
+    }
+
+    #[test]
     fn scrolling_keeps_its_place_while_new_output_arrives() {
         let mut app = long_conversation();
         app.scroll_up(30);
@@ -1037,6 +1093,40 @@ mod tests {
         assert!(screen.contains("bash"));
         assert!(screen.contains("hello"));
         assert!(!screen.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn wraps_long_tool_output_to_the_chat_width() {
+        let mut app = App::new(&config());
+        app.on_agent_event(AgentEvent::ToolStarted {
+            id: "call_1".to_string(),
+            name: "bash".to_string(),
+            args: r#"{"command":"printf output"}"#.to_string(),
+        });
+        app.on_agent_event(AgentEvent::ToolFinished {
+            id: "call_1".to_string(),
+            ok: true,
+            output: "abcdefghijabcdefghijabcdefghij".to_string(),
+        });
+
+        let rows = screen_rows(&mut app, 30, 20);
+        assert!(rows.iter().any(|row| row.contains("abcdefgh")));
+        assert!(rows.iter().filter(|row| row.contains("│")).count() >= 2);
+    }
+
+    #[test]
+    fn keeps_busy_indicator_and_footer_status_separate() {
+        let mut app = App::new(&config());
+        app.model = "a-model-name-that-is-too-long-for-the-header".to_string();
+        app.workspace = "/a/very/long/workspace/path/that/does/not/fit".to_string();
+        app.busy = true;
+        app.status = Some("waiting for approval".to_string());
+
+        let rows = screen_rows(&mut app, 70, 20);
+        assert!(rows[0].contains("sarvam-code"));
+        assert!(rows[0].contains("working"));
+        assert!(rows[19].contains("esc cancel"));
+        assert!(rows[19].contains("waiting for approval"));
     }
 
     #[test]
@@ -1135,6 +1225,21 @@ mod tests {
             .find(|row| row.contains("/model"))
             .expect("/model row");
         assert!(model_row.contains('›'));
+    }
+
+    #[test]
+    fn shows_fuzzy_model_palette_after_model_command() {
+        let mut app = App::new(&config());
+        app.input.set("/model s105".to_string());
+
+        let rows = screen_rows(&mut app, 70, 24);
+        assert!(rows.iter().any(|row| row.contains("models 2 matches")));
+        assert!(rows.iter().any(|row| row.contains("sarvam-105b")));
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("sarvam-105b-conversations"))
+        );
+        assert!(!rows.iter().any(|row| row.contains("gemma4")));
     }
 
     #[test]

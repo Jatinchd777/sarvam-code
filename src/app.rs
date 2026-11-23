@@ -27,6 +27,47 @@ impl SlashCommand {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum Completion {
+    Command(&'static SlashCommand),
+    Model(&'static str),
+}
+
+impl Completion {
+    pub fn label(self) -> String {
+        match self {
+            Self::Command(command) => command.label(),
+            Self::Model(model) => model.to_string(),
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Command(command) => command.description,
+            Self::Model(_) => "Sarvam model",
+        }
+    }
+
+    pub fn is_model(self) -> bool {
+        matches!(self, Self::Model(_))
+    }
+
+    pub fn is_named(self, text: &str) -> bool {
+        match self {
+            Self::Command(command) => command.is_named(text),
+            Self::Model(_) => false,
+        }
+    }
+}
+
+pub const AVAILABLE_MODELS: &[&str] = &[
+    "sarvam-105b",
+    "sarvam-105b-conversations",
+    "deepseekv4.1-flash-1017",
+    "glm5.3",
+    "gemma4",
+];
+
 pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
@@ -96,6 +137,17 @@ pub fn command_matches(input: &str) -> Vec<&'static SlashCommand> {
     // stay in their declared order.
     scored.sort_by_key(|left| std::cmp::Reverse(left.0));
     scored.into_iter().map(|(_, command)| command).collect()
+}
+
+fn model_matches(input: &str) -> Option<Vec<&'static str>> {
+    let query = input.strip_prefix("/model ")?;
+    let query = query.trim();
+    let mut scored: Vec<(i32, &'static str)> = AVAILABLE_MODELS
+        .iter()
+        .filter_map(|model| score_name(query, model).map(|score| (score, *model)))
+        .collect();
+    scored.sort_by_key(|left| std::cmp::Reverse(left.0));
+    Some(scored.into_iter().map(|(_, model)| model).collect())
 }
 
 fn score_command(query: &str, command: &SlashCommand) -> Option<i32> {
@@ -478,15 +530,21 @@ impl App {
         self.scroll = 0;
     }
 
-    pub fn completion_matches(&self) -> Vec<&'static SlashCommand> {
+    pub fn completion_matches(&self) -> Vec<Completion> {
+        if let Some(models) = model_matches(&self.input.text) {
+            return models.into_iter().map(Completion::Model).collect();
+        }
         command_matches(&self.input.text)
+            .into_iter()
+            .map(Completion::Command)
+            .collect()
     }
 
     pub fn completion_open(&self) -> bool {
         !self.completion_matches().is_empty()
     }
 
-    pub fn selected_completion(&self) -> Option<&'static SlashCommand> {
+    pub fn selected_completion(&self) -> Option<Completion> {
         let matches = self.completion_matches();
         if matches.is_empty() {
             return None;
@@ -496,12 +554,15 @@ impl App {
             .copied()
     }
 
-    /// Replace the input with the highlighted command plus a trailing space.
+    /// Replace the input with the highlighted command or model.
     pub fn complete_selected(&mut self) -> bool {
         let Some(command) = self.selected_completion() else {
             return false;
         };
-        self.input.set(format!("{} ", command.name));
+        match command {
+            Completion::Command(command) => self.input.set(format!("{} ", command.name)),
+            Completion::Model(model) => self.input.set(format!("/model {model}")),
+        }
         self.completion_index = 0;
         true
     }
@@ -789,16 +850,58 @@ mod tests {
         let mut app = App::new(&config());
         app.input.set("/mo".to_string());
         assert!(app.completion_open());
-        assert_eq!(app.selected_completion().map(|c| c.name), Some("/mode"));
+        assert!(matches!(
+            app.selected_completion(),
+            Some(Completion::Command(command)) if command.name == "/mode"
+        ));
 
         app.completion_move(1);
-        assert_eq!(app.selected_completion().map(|c| c.name), Some("/model"));
+        assert!(matches!(
+            app.selected_completion(),
+            Some(Completion::Command(command)) if command.name == "/model"
+        ));
         app.completion_move(1);
-        assert_eq!(app.selected_completion().map(|c| c.name), Some("/mode"));
+        assert!(matches!(
+            app.selected_completion(),
+            Some(Completion::Command(command)) if command.name == "/mode"
+        ));
 
         assert!(app.complete_selected());
         assert_eq!(app.input.text, "/mode ");
         app.reset_completion();
         assert_eq!(app.completion_index, 0);
+    }
+
+    #[test]
+    fn model_palette_lists_and_fuzzy_filters_models() {
+        let mut app = App::new(&config());
+        app.input.set("/model ".to_string());
+        assert_eq!(app.completion_matches().len(), AVAILABLE_MODELS.len());
+        assert!(matches!(
+            app.selected_completion(),
+            Some(Completion::Model("sarvam-105b"))
+        ));
+
+        app.input.set("/model s105".to_string());
+        assert_eq!(
+            app.completion_matches()
+                .iter()
+                .map(|completion| completion.label())
+                .collect::<Vec<_>>(),
+            vec!["sarvam-105b", "sarvam-105b-conversations"]
+        );
+    }
+
+    #[test]
+    fn model_completion_can_be_applied() {
+        let mut app = App::new(&config());
+        app.input.set("/model gem".to_string());
+        assert!(app.complete_selected());
+        assert_eq!(app.input.text, "/model gemma4");
+        assert!(matches!(
+            app.submit(),
+            Some(Command::SetModel(model)) if model == "gemma4"
+        ));
+        assert_eq!(app.model, "gemma4");
     }
 }

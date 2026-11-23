@@ -50,6 +50,8 @@ impl FromStr for PermissionMode {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileConfig {
+    #[serde(rename = "api-key")]
+    pub api_key: Option<String>,
     pub model: Option<String>,
     pub api_url: Option<String>,
     pub effort: Option<String>,
@@ -93,14 +95,6 @@ pub struct Config {
 
 impl Config {
     pub fn load(overrides: Overrides) -> Result<Self> {
-        let api_key = env::var("SARVAM_API_KEY")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .context(
-                "SARVAM_API_KEY is not set. Export it first (any dummy value works with scripts/mock-sarvam.py).",
-            )?;
-
         let workspace = env::current_dir().context("cannot determine the current directory")?;
         let workspace = fs::canonicalize(&workspace).unwrap_or(workspace);
 
@@ -109,6 +103,13 @@ impl Config {
             .with_context(|| format!("cannot create state directory: {}", state_dir.display()))?;
 
         let file = load_file_config()?;
+        let api_key = file
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .context("config file must contain a non-empty `api-key` field")?
+            .to_string();
 
         let model = overrides
             .model
@@ -272,5 +273,11 @@ mod tests {
             PermissionMode::Yolo
         );
         assert!(PermissionMode::from_str("sometimes").is_err());
+    }
+
+    #[test]
+    fn parses_hyphenated_api_key_field() {
+        let config: FileConfig = toml::from_str("api-key = \"test-key\"").unwrap();
+        assert_eq!(config.api_key.as_deref(), Some("test-key"));
     }
 }
