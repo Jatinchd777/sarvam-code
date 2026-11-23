@@ -506,23 +506,19 @@ fn block_tool(tool: &ToolItem, width: usize, spinner: usize, expanded: bool) -> 
         ToolStatus::Ok => ("✓".to_string(), Color::Green),
         ToolStatus::Error => ("✗".to_string(), Color::Red),
     };
-    let (label, action) = match tool.name.as_str() {
-        "list_dir" => ("LIST", "listing"),
-        "read_file" => ("READ", "reading"),
-        "edit_file" => ("EDIT", "editing"),
-        "write_file" => ("WRITE", "writing"),
-        "bash" => ("RUN", "running"),
-        _ => ("TOOL", "using"),
+    let label = match tool.name.as_str() {
+        "list_dir" => "LIST",
+        "read_file" => "READ",
+        "edit_file" => "EDIT",
+        "write_file" => "WRITE",
+        "bash" => "RUN",
+        _ => "TOOL",
     };
 
     let mut header = vec![
         Span::styled(format!("{icon} "), Style::default().fg(color)),
         Span::styled(
-            if tool.status == ToolStatus::Running {
-                format!("{action} {label}")
-            } else {
-                label.to_string()
-            },
+            format!("{label:<5}"),
             Style::default()
                 .fg(Color::LightBlue)
                 .add_modifier(Modifier::BOLD),
@@ -543,7 +539,6 @@ fn block_tool(tool: &ToolItem, width: usize, spinner: usize, expanded: bool) -> 
 
     let output = sanitize(&tool.output);
     let lines: Vec<&str> = output.trim_end_matches('\n').split('\n').collect();
-    let limit = if expanded { lines.len() } else { 4 };
     let style = if tool.status == ToolStatus::Error {
         Style::default().fg(Color::Red)
     } else {
@@ -551,8 +546,35 @@ fn block_tool(tool: &ToolItem, width: usize, spinner: usize, expanded: bool) -> 
     };
     let output_width = width.saturating_sub(6).max(1);
     let options = textwrap::Options::new(output_width).break_words(true);
+    if !expanded {
+        if tool.status == ToolStatus::Error {
+            let first = lines.first().copied().unwrap_or_default();
+            out.push(Line::from(vec![
+                Span::styled("  ! ", Style::default().fg(Color::Red)),
+                Span::styled(first.to_string(), style),
+            ]));
+            if lines.len() > 1 {
+                out.push(Line::from(Span::styled(
+                    format!("  ↳ +{} lines · ctrl+o to expand", lines.len() - 1),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        } else if matches!(tool.name.as_str(), "edit_file" | "write_file") {
+            return out;
+        } else {
+            out.push(Line::from(Span::styled(
+                format!(
+                    "  ↳ {} output line{} · ctrl+o to expand",
+                    lines.len(),
+                    if lines.len() == 1 { "" } else { "s" }
+                ),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        return out;
+    }
 
-    for line in lines.iter().take(limit) {
+    for line in &lines {
         let line = line.replace('\t', "    ");
         for chunk in textwrap::wrap(&line, options.clone()) {
             out.push(Line::from(vec![
@@ -560,15 +582,6 @@ fn block_tool(tool: &ToolItem, width: usize, spinner: usize, expanded: bool) -> 
                 Span::styled(chunk.into_owned(), style),
             ]));
         }
-    }
-    if lines.len() > limit {
-        out.push(Line::from(vec![Span::styled(
-            format!(
-                "  │ … {} more lines (ctrl+o)",
-                lines.len().saturating_sub(limit)
-            ),
-            Style::default().fg(Color::DarkGray),
-        )]));
     }
     out
 }
@@ -1177,10 +1190,31 @@ mod tests {
             ok: true,
             output: "abcdefghijabcdefghijabcdefghij".to_string(),
         });
+        app.expand_tools = true;
 
         let rows = screen_rows(&mut app, 30, 20);
         assert!(rows.iter().any(|row| row.contains("abcdefgh")));
         assert!(rows.iter().filter(|row| row.contains("│")).count() >= 2);
+    }
+
+    #[test]
+    fn keeps_completed_tool_output_collapsed_by_default() {
+        let mut app = App::new(&config());
+        app.on_agent_event(AgentEvent::ToolStarted {
+            id: "call_1".to_string(),
+            name: "read_file".to_string(),
+            args: r#"{"path":"src/main.rs"}"#.to_string(),
+        });
+        app.on_agent_event(AgentEvent::ToolFinished {
+            id: "call_1".to_string(),
+            ok: true,
+            output: "1: fn main() {}\n2: // more source".to_string(),
+        });
+
+        let screen = rendered(&mut app, 80, 20);
+        assert!(screen.contains("READ"));
+        assert!(screen.contains("2 output lines"));
+        assert!(!screen.contains("fn main()"));
     }
 
     #[test]
