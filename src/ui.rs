@@ -171,14 +171,23 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         ),
     ]);
     if app.busy {
-        let chunks = Layout::horizontal([Constraint::Min(0), Constraint::Length(10)]).split(area);
+        let activity = app.activity.as_deref().unwrap_or("working");
+        let status_width =
+            (UnicodeWidthStr::width(activity) + 3).clamp(10, (area.width / 2) as usize) as u16;
+        let chunks =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(status_width)]).split(area);
         frame.render_widget(Paragraph::new(line), chunks[0]);
         let status = Line::from(vec![
             Span::styled(
                 format!("{} ", spinner_glyph(app.spinner)),
                 Style::default().fg(Color::Yellow),
             ),
-            Span::styled("working", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                activity.to_string(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
         ]);
         frame.render_widget(
@@ -497,11 +506,23 @@ fn block_tool(tool: &ToolItem, width: usize, spinner: usize, expanded: bool) -> 
         ToolStatus::Ok => ("✓".to_string(), Color::Green),
         ToolStatus::Error => ("✗".to_string(), Color::Red),
     };
+    let (label, action) = match tool.name.as_str() {
+        "list_dir" => ("LIST", "listing"),
+        "read_file" => ("READ", "reading"),
+        "edit_file" => ("EDIT", "editing"),
+        "write_file" => ("WRITE", "writing"),
+        "bash" => ("RUN", "running"),
+        _ => ("TOOL", "using"),
+    };
 
     let mut header = vec![
         Span::styled(format!("{icon} "), Style::default().fg(color)),
         Span::styled(
-            tool.name.clone(),
+            if tool.status == ToolStatus::Running {
+                format!("{action} {label}")
+            } else {
+                label.to_string()
+            },
             Style::default()
                 .fg(Color::LightBlue)
                 .add_modifier(Modifier::BOLD),
@@ -648,7 +669,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::DarkGray)
         })
         .title(Line::from(Span::styled(
-            " message ",
+            " prompt ",
             Style::default().fg(Color::DarkGray),
         )));
 
@@ -669,6 +690,17 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
 
+    let content = if app.input.text.is_empty() {
+        Span::styled(
+            clip_cells(
+                "Describe a task, ask a question, or type / for commands",
+                text_width,
+            ),
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::styled(visible, style)
+    };
     let line = Line::from(vec![
         Span::styled(
             "› ",
@@ -676,7 +708,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(visible, style),
+        content,
     ]);
     frame.render_widget(Paragraph::new(line), inner);
 
@@ -691,7 +723,12 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let hint = if app.completion_open() {
+    let hint = if app
+        .selected_completion()
+        .is_some_and(|item| item.is_model())
+    {
+        "↑↓ choose · tab complete · enter switch · esc clear"
+    } else if app.completion_open() {
         "↑↓ select · tab complete · enter run · esc clear"
     } else if app.busy {
         "esc cancel · wheel/pgup scroll · ctrl+o tools · ctrl+c quit"
@@ -800,9 +837,7 @@ fn draw_permission(frame: &mut Frame, modal: &PermissionModal) {
     frame.render_widget(head, layout[0]);
 
     frame.render_widget(
-        Paragraph::new(sanitize(&modal.details))
-            .style(Style::default().fg(Color::Gray))
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(permission_preview_lines(modal)).wrap(Wrap { trim: false }),
         layout[1],
     );
 
@@ -832,6 +867,40 @@ fn draw_permission(frame: &mut Frame, modal: &PermissionModal) {
     .alignment(Alignment::Center)
     .wrap(Wrap { trim: true });
     frame.render_widget(hints, layout[2]);
+}
+
+fn permission_preview_lines(modal: &PermissionModal) -> Vec<Line<'static>> {
+    let mut section = "";
+    sanitize(&modal.details)
+        .lines()
+        .map(|raw| {
+            let style = match (modal.tool.as_str(), raw) {
+                ("edit_file", "--- old") => {
+                    section = "old";
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                }
+                ("edit_file", "+++ new") => {
+                    section = "new";
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                }
+                ("edit_file", _) if section == "old" => Style::default().fg(Color::Red),
+                ("edit_file", _) if section == "new" => Style::default().fg(Color::Green),
+                ("bash", _) if raw.starts_with("$ ") => Style::default()
+                    .fg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD),
+                ("bash", _) if raw.starts_with("API credentials") => {
+                    Style::default().fg(Color::DarkGray)
+                }
+                ("write_file", _) if raw.ends_with(" bytes") => {
+                    Style::default().fg(Color::DarkGray)
+                }
+                _ => Style::default().fg(Color::Gray),
+            };
+            Line::from(Span::styled(raw.to_string(), style))
+        })
+        .collect()
 }
 
 fn spinner_glyph(step: usize) -> &'static str {
@@ -1090,7 +1159,7 @@ mod tests {
 
         let screen = rendered(&mut app, 100, 30);
         assert!(screen.contains("sarvam-code"));
-        assert!(screen.contains("bash"));
+        assert!(screen.contains("RUN"));
         assert!(screen.contains("hello"));
         assert!(!screen.contains('\u{1b}'));
     }
@@ -1120,13 +1189,39 @@ mod tests {
         app.model = "a-model-name-that-is-too-long-for-the-header".to_string();
         app.workspace = "/a/very/long/workspace/path/that/does/not/fit".to_string();
         app.busy = true;
+        app.activity = Some("running command".to_string());
         app.status = Some("waiting for approval".to_string());
 
         let rows = screen_rows(&mut app, 70, 20);
         assert!(rows[0].contains("sarvam-code"));
-        assert!(rows[0].contains("working"));
+        assert!(rows[0].contains("running command"));
         assert!(rows[19].contains("esc cancel"));
         assert!(rows[19].contains("waiting for approval"));
+    }
+
+    #[test]
+    fn shows_prompt_placeholder_and_model_activity() {
+        let mut app = App::new(&config());
+        app.busy = true;
+        app.activity = Some("reading file".to_string());
+
+        let rows = screen_rows(&mut app, 80, 20);
+        assert!(rows[0].contains("reading file"));
+        assert!(rows.iter().any(|row| row.contains("Describe a task")));
+        assert!(rows.iter().any(|row| row.contains("prompt")));
+    }
+
+    #[test]
+    fn colors_edit_approval_preview_as_a_diff() {
+        let modal = PermissionModal {
+            id: 1,
+            tool: "edit_file".to_string(),
+            summary: "edit_file → src/main.rs".to_string(),
+            details: "--- old\nold line\n\n+++ new\nnew line".to_string(),
+        };
+        let lines = permission_preview_lines(&modal);
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(lines[3].spans[0].style.fg, Some(Color::Green));
     }
 
     #[test]
@@ -1182,7 +1277,7 @@ mod tests {
             .expect("palette title is visible");
         let input = rows
             .iter()
-            .position(|row| row.contains("message"))
+            .position(|row| row.contains("prompt"))
             .expect("input box is visible");
         assert!(palette < input, "palette should sit above the input");
         assert!(
@@ -1210,7 +1305,7 @@ mod tests {
             .expect("palette title");
         let end = rows
             .iter()
-            .position(|row| row.contains("message"))
+            .position(|row| row.contains("prompt"))
             .expect("input box");
         let palette = &rows[start..end];
         assert!(palette[0].contains("2 matches"));

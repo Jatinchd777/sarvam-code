@@ -68,6 +68,17 @@ pub const AVAILABLE_MODELS: &[&str] = &[
     "gemma4",
 ];
 
+pub fn tool_activity(name: &str) -> &'static str {
+    match name {
+        "list_dir" => "listing files",
+        "read_file" => "reading file",
+        "edit_file" => "reviewing edit",
+        "write_file" => "writing file",
+        "bash" => "running command",
+        _ => "using tool",
+    }
+}
+
 pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
@@ -272,6 +283,7 @@ pub struct App {
     pub input: Input,
     pub busy: bool,
     pub spinner: usize,
+    pub activity: Option<String>,
     /// Lines scrolled up from the bottom. 0 means follow new output.
     pub scroll: usize,
     /// Last rendered total line count, used to anchor the viewport when
@@ -297,6 +309,7 @@ impl App {
             input: Input::new(),
             busy: false,
             spinner: 0,
+            activity: None,
             scroll: 0,
             last_total_lines: 0,
             viewport_height: 20,
@@ -312,13 +325,21 @@ impl App {
         match event {
             AgentEvent::TurnStarted => {
                 self.busy = true;
+                self.activity = Some("thinking".to_string());
                 self.permission = None;
                 self.status = None;
                 self.finalize_assistants();
             }
-            AgentEvent::TextDelta(text) => self.push_text(text),
-            AgentEvent::ReasoningDelta(text) => self.push_reasoning(text),
+            AgentEvent::TextDelta(text) => {
+                self.activity = Some("responding".to_string());
+                self.push_text(text);
+            }
+            AgentEvent::ReasoningDelta(text) => {
+                self.activity = Some("reasoning".to_string());
+                self.push_reasoning(text);
+            }
             AgentEvent::ToolStarted { id, name, args } => {
+                self.activity = Some(tool_activity(&name).to_string());
                 self.finalize_assistants();
                 self.items.push(Item::Tool(ToolItem {
                     id,
@@ -329,6 +350,7 @@ impl App {
                 }));
             }
             AgentEvent::ToolFinished { id, ok, output } => {
+                self.activity = Some("thinking".to_string());
                 let status = if ok {
                     ToolStatus::Ok
                 } else {
@@ -357,6 +379,7 @@ impl App {
                 summary,
                 details,
             } => {
+                self.activity = Some("approval needed".to_string());
                 self.finalize_assistants();
                 self.permission = Some(PermissionModal {
                     id,
@@ -381,17 +404,20 @@ impl App {
             AgentEvent::Reset => {
                 self.items.clear();
                 self.busy = false;
+                self.activity = None;
                 self.permission = None;
                 self.scroll = 0;
             }
             AgentEvent::TurnFinished => {
                 self.busy = false;
+                self.activity = None;
                 self.permission = None;
                 self.status = None;
                 self.finalize_assistants();
             }
             AgentEvent::TurnFailed(reason) => {
                 self.busy = false;
+                self.activity = None;
                 self.permission = None;
                 self.status = None;
                 self.finalize_assistants();
@@ -870,6 +896,31 @@ mod tests {
         assert_eq!(app.input.text, "/mode ");
         app.reset_completion();
         assert_eq!(app.completion_index, 0);
+    }
+
+    #[test]
+    fn activity_tracks_model_and_tool_state() {
+        let mut app = App::new(&config());
+        app.on_agent_event(AgentEvent::TurnStarted);
+        assert_eq!(app.activity.as_deref(), Some("thinking"));
+
+        app.on_agent_event(AgentEvent::ToolStarted {
+            id: "call_1".to_string(),
+            name: "read_file".to_string(),
+            args: r#"{"path":"src/main.rs"}"#.to_string(),
+        });
+        assert_eq!(app.activity.as_deref(), Some("reading file"));
+
+        app.on_agent_event(AgentEvent::PermissionRequest {
+            id: 1,
+            tool: "bash".to_string(),
+            summary: "bash → cargo test".to_string(),
+            details: "$ cargo test".to_string(),
+        });
+        assert_eq!(app.activity.as_deref(), Some("approval needed"));
+
+        app.on_agent_event(AgentEvent::TurnFailed("cancelled".to_string()));
+        assert_eq!(app.activity, None);
     }
 
     #[test]

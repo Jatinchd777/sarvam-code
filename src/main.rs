@@ -260,6 +260,9 @@ async fn handle_key(
         };
         if let Some(decision) = decision {
             let _ = permissions.send((modal.id, decision)).await;
+            if decision != Decision::Deny {
+                app.activity = Some(app::tool_activity(&modal.tool).to_string());
+            }
             app.permission = None;
             app.status = Some(
                 match decision {
